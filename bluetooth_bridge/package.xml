@@ -1,0 +1,19 @@
+<package>
+  <name>bluetooth_bridge</name>
+  <version>0.0.1</version>
+  <description>
+    A Python-based, serial bridge facilitator for relaying ROS messages over a serial socket. Intented specifically for communication of two full Linux machines over bluetooth.
+  </description>
+  <author>Michael Ferguson</author>
+  <author>Max Svetlik</author>
+  <maintainer email="maxsvetlik@utexas.edu">Max Svetlik</maintainer>
+  <license>BSD</license>
+  <url></url>
+
+  <buildtool_depend>catkin</buildtool_depend>
+
+  <run_depend>rospy</run_depend>
+  <run_depend>rosserial_msgs</run_depend>
+  <run_depend>diagnostic_msgs</run_depend>
+  <run_depend>python-serial</run_depend>
+</package>
