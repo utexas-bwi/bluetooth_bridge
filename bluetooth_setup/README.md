@@ -8,9 +8,7 @@ Required for bluetooth development:
 
 sudo apt-get install libbluetooth-dev bluez bluez-tools
 
-sudo pip3 install pygatt
-sudo pip3 install pygattlib
-sudo pip3 install pybluez
+sudo pip3 install pygatt pygattlib pybluez
 
 maybe:
 USER must a member of the following groups:
