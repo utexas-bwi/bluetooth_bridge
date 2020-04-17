@@ -11,7 +11,7 @@ import yaml
 
 # Logger levels
 DEBUG = True
-DEBUGG = False
+DEBUGG = True
 DEBUGGG = False
 
 
@@ -21,6 +21,8 @@ class BluetoothPortManager:
         self.poll_frequency = 1 #seconds
         self.scan_timeout = 3 #seconds
         self.address_timeout = 10 #seconds; time, after which an address is considered 'stale'
+        self.clients = [] #who we're serving
+        self.servers = [] #who we're connected to
 
         self.available_devices = dict() #BLE scan results and the last time they were seen
         self.available_devices_lock = threading.Lock()
@@ -28,7 +30,7 @@ class BluetoothPortManager:
         self.mac_whitelist = self._load_yaml("config/whitelist.yaml")
         self.my_mac = bluetooth.read_local_bdaddr()[0]
         self.my_nice = self.mac_whitelist[self.my_mac]['nice']
-    
+
     def _sum_mac_addr(self, mac_addr):
         acc = 0
         for byte_pair in mac_addr.split(':'):
@@ -51,17 +53,22 @@ class BluetoothPortManager:
                         if DEBUG:
                             print("Remote " + addr + " found in whitelist.")
                         remote_nice = self.mac_whitelist[addr]['nice']
+
                         # standard policy, greater nice value acts as server
-                        if self.my_nice > remote_nice:
+                        if self.my_nice > remote_nice and addr not in self.clients:
                             #spin up server
                             if DEBUGG:
                                 print("Found remote with smaller nice value. Hosting...")
+                            self.clients.append(addr)
                             self.rfcomm_serve()
+
                         else:
-                            #spin up client
-                            if DEBUGG:
-                                print("Found remote with greater nice value. Connecting...")
-                            self.rfcomm_client(addr)
+                            if addr not in self.servers:
+                                #spin up client
+                                if DEBUGG:
+                                    print("Found remote with greater nice value. Connecting...")
+                                self.servers.append(addr)
+                                self.rfcomm_client(addr)
                 time.sleep(0.5)
 
         except KeyboardInterrupt:
@@ -124,7 +131,7 @@ class BluetoothPortManager:
         self.bt_add_channel(22)
         command = ['rfcomm', 'connect', '/dev/rfcomm0', str(server_mac), '22']
         result = subprocess.run(command, stdout=subprocess.DEVNULL)
-
+        self.servers.remove(server_mac)
 
     def bt_port_server(self):
 
