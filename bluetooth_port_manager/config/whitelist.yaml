@@ -1,0 +1,6 @@
+"7C:5C:F8:CC:B4:55" : 
+    hostname: "morbo"
+    nice: 10
+"0C:DD:24:C0:AC:7D" :
+    hostname: "sentinel"
+    nice : 6

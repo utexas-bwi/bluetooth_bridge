@@ -7,47 +7,75 @@ import threading
 import time
 import math
 import subprocess
+import yaml
+
+# Logger levels
+DEBUG = True
+DEBUGG = False
+DEBUGGG = False
 
 
 class BluetoothPortManager:
 
-    # Logger levels
-    DEBUG = True
-    DEBUGG = False
-    DEBUGGG = False
-
     def __init__(self):
         self.poll_frequency = 1 #seconds
-        self.scan_timeout = 2 #seconds
+        self.scan_timeout = 3 #seconds
         self.address_timeout = 10 #seconds; time, after which an address is considered 'stale'
-        self.mac_whitelist = []
+
         self.available_devices = dict() #BLE scan results and the last time they were seen
         self.available_devices_lock = threading.Lock()
         self.shutdown = False
+        self.mac_whitelist = self._load_yaml("config/whitelist.yaml")
+        self.my_mac = bluetooth.read_local_bdaddr()[0]
+        self.my_nice = self.mac_whitelist[self.my_mac]['nice']
+    
+    def _sum_mac_addr(self, mac_addr):
+        acc = 0
+        for byte_pair in mac_addr.split(':'):
+            acc += int(byte_pair[0], 16)
+            acc += int(byte_pair[1], 16)
+        return acc
 
-
+    def _load_yaml(self, yaml_path):
+        with open(yaml_path, 'r') as stream:
+            return yaml.safe_load(stream)
 
     def run(self):
         # Setup address polling
-        threading.Timer(self.poll_frequency, self.scan_addresses_low_energy).start()
+        threading.Timer(self.poll_frequency, self.scan_addresses).start()
 
         try:
             while not self.shutdown:
+                for addr in self.available_devices.keys():
+                    if addr in self.mac_whitelist.keys():
+                        if DEBUG:
+                            print("Remote " + addr + " found in whitelist.")
+                        remote_nice = self.mac_whitelist[addr]['nice']
+                        # standard policy, greater nice value acts as server
+                        if self.my_nice > remote_nice:
+                            #spin up server
+                            if DEBUGG:
+                                print("Found remote with smaller nice value. Hosting...")
+                            self.rfcomm_serve()
+                        else:
+                            #spin up client
+                            if DEBUGG:
+                                print("Found remote with greater nice value. Connecting...")
+                            self.rfcomm_client(addr)
                 time.sleep(0.5)
 
         except KeyboardInterrupt:
             self.shutdown = True
             print("Keyboard Interrupt detected. Exiting...")
 
-    def scan_addresses_low_energy(self):
-        service = DiscoveryService()
-        devices = service.discover(self.scan_timeout)
+    def scan_addresses(self):
+        le_devices = self.scan_addresses_low_energy()
+        std_devices = self.scan_addresses_std()
+        devices = le_devices + std_devices
         addrs = self.available_devices
 
-        for address, name in devices.items():
+        for address in devices:
             addrs[address] = math.ceil(time.time())
-            if self.DEBUGG:
-                print("address: {}".format(address))
 
         #remove stale addresses
         for k in list(addrs.keys()):
@@ -57,33 +85,31 @@ class BluetoothPortManager:
         with self.available_devices_lock:
             self.available_devices = addrs
 
-        if self.DEBUG:
-            print(self.available_devices)
+        if DEBUGGG:
+            print("Available Devices: " + self.available_devices)
 
         if not self.shutdown:
-            threading.Timer(self.poll_frequency, self.scan_addresses_low_energy).start()
+            threading.Timer(self.poll_frequency, self.scan_addresses).start()
 
-    """
-    This scans for 'classic' bluetooth devices. Currently for reference only
-    """
-    def scan_addresses(self):
-        names = False
-        if names:
-            nearby_devices = bluetooth.discover_devices(lookup_names=True, duration=3)
-            print("Found {} devices.".format(len(nearby_devices)))
-            for addr, name in nearby_devices:
-                print("  {} - {}".format(addr, name))
-        else:
-            nearby_devices = bluetooth.discover_devices(lookup_names=False, duration=5)
-            print("Found {} devices.".format(len(nearby_devices)))
 
-            for addr in nearby_devices:
-                print("  {}".format(addr))
+    def scan_addresses_low_energy(self):
+        service = DiscoveryService()
+        devices = []
+        for addr, name in service.discover(self.scan_timeout).items():
+            devices.append(addr)
+        return devices
+    """
+    This scans for 'classic' bluetooth devices like those on Desktops
+    This scan generally requires more time to pick up devices.
+    """
+    #TODO spin this as its own Timer
+    def scan_addresses_std(self):
+        return bluetooth.discover_devices(lookup_names=False, duration=self.scan_timeout)
 
     def bt_add_channel(self, channel_no):
         command = ['sdptool', 'add', '--channel=22', 'SP']
         result = subprocess.run(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        
+
         if result.returncode != 0:
             print("Unable to add channel via sdptool.")
             #TODO throw error
@@ -94,14 +120,10 @@ class BluetoothPortManager:
         command = ['rfcomm', 'watch', '/dev/rfcomm0', '22']
         result = subprocess.run(command, stdout=subprocess.DEVNULL)
 
-        time.sleep(100)
-
     def rfcomm_client(self, server_mac):
         self.bt_add_channel(22)
         command = ['rfcomm', 'connect', '/dev/rfcomm0', str(server_mac), '22']
         result = subprocess.run(command, stdout=subprocess.DEVNULL)
-
-        time.sleep(100)
 
 
     def bt_port_server(self):
@@ -133,6 +155,5 @@ class BluetoothPortManager:
 
 if __name__ == "__main__":
     btpm = BluetoothPortManager()
-    btpm.rfcomm_client("0C:DD:24:C0:AC:7D")
-    #btpm.run()
+    btpm.run()
 
