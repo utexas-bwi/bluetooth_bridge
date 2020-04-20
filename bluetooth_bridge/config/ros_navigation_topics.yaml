@@ -1,0 +1,6 @@
+subscribers:
+    "/amcl_pose" : "geometry_msgs/PoseWithCovarianceStamped"
+    "/cmd_vel" : "geometry_msgs/Twist"
+    "/move_base/current_goal" : "geometry_msgs/PoseStamped"
+    "/move_base/EBandPlannerROS/local_plan" : "nav_msgs/Path"
+    "/odom" : "nav_msgs/Odometry"

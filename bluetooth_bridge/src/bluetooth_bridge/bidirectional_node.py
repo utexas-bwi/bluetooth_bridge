@@ -442,7 +442,7 @@ class BidirectionalNode:
         try:
             msg = TopicInfo()
             msg.deserialize(data)
-            if msg.topic_id in self.publishers.keys():
+            if msg.topic_name in self.publishers.keys():
                 rospy.loginfo("Publisher exists on %s [%s]" % (msg.topic_name, msg.message_type) )
                 return
             pub = Publisher(msg)
