@@ -7,7 +7,7 @@ import thread
 import threading
 from serial import *
 import StringIO
-from collections import OrderedDict 
+from collections import OrderedDict
 from std_msgs.msg import Time
 from rosserial_msgs.msg import *
 from rosserial_msgs.srv import *
@@ -17,6 +17,7 @@ import diagnostic_msgs.msg
 import socket
 import time
 import struct
+import yaml
 
 import zlib
 
@@ -92,7 +93,7 @@ class Subscriber:
 
     def unregister(self):
         rospy.loginfo("Removing subscriber: %s", self.topic)
-        self.sub.unregister()            
+        self.sub.unregister()
 
     def callback(self, msg):
         """ Forward message to serial device. """
@@ -127,7 +128,7 @@ class ServiceServer:
 
     def unregister(self):
         rospy.loginfo("Removing service: %s", self.topic)
-        self.service.shutdown()                    
+        self.service.shutdown()
 
     def callback(self, req):
         """ Forward request to serial device. """
@@ -244,8 +245,23 @@ class BidirectionalNode:
 	self.sub_ids=15
 
         #rospy.sleep(2.0) # TODO
-	self.subscribeAllPublished()
-	self.negotiateTopics()
+
+        # Reason about what local topics get exposed to remote bridges
+        all_topics = rospy.get_param('~share_all_topics', False)
+        if all_topics:
+            rospy.loginfo("share_all_topics set to True. All local topics will be accessible over bluetooth_bridge.")
+            self.subscribeAllPublished()
+        else:
+            topic_whitelist = rospy.get_param('~shared_topics_file', None)
+            if topic_whitelist is None:
+                rospy.logerr("Could not load topic whitelist under bluetooth_bridge/shared_topics. Exiting...")
+                exit(-1)
+
+            rospy.loginfo("Attempting to retrieve shared topic list at " + topic_whitelist)
+            with open(topic_whitelist, 'r') as stream:
+                topic_whitelist = yaml.safe_load(stream)
+                self.subscribeWhitelist(topic_whitelist)
+        self.negotiateTopics()
         self.requestTopics()
         self.lastsync = rospy.Time.now()
 
@@ -288,7 +304,7 @@ class BidirectionalNode:
 		self.port.close()
 		break
 
-	    if (flag[0] != '\xff'):                
+	    if (flag[0] != '\xff'):
                 continue
             if ( flag[1] != self.protocol_ver):
                 # clear the  serial port buffer
@@ -361,31 +377,56 @@ class BidirectionalNode:
             self.buffer_in = bytes
             rospy.loginfo("Note: subscribe buffer size is %d bytes" % self.buffer_in)
 
+    def subscribeWhitelist(self, topic_whitelist):
+        msg = TopicInfo()
+	msg.buffer_size = self.buffer_in
+	blacklist_topics = ['/rosout', '/rosout_agg']
+        if 'subscribers' in topic_whitelist.keys():
+            topics = topic_whitelist['subscribers']
+            for tup in topics.keys():
+                topic_name = tup
+                topic_type = topics[tup]
+
+                if topic_name not in blacklist_topics:
+                   msg.topic_id = self.sub_ids
+                   self.sub_ids+=1
+                   msg.topic_name = topic_name
+                   msg.message_type = topic_type
+                   pkg, msg_name = topic_type.split('/')
+                   self.message = load_message(pkg, msg_name)
+                   msg.md5sum = self.message._md5sum
+
+                   sub = Subscriber(msg, self)
+                   self.subscribers[msg.topic_name] = sub
+                   self.setSubscribeSize(msg.buffer_size)
+                   rospy.loginfo("Setup subscriber on %s [%s]" % (msg.topic_name, msg.message_type) )
+
+
     def subscribeAllPublished(self):
 	msg = TopicInfo()
 	msg.buffer_size = self.buffer_in
-	blacklist_topics = ['/rosout', '/rosout_agg']	
+	blacklist_topics = ['/rosout', '/rosout_agg']
         for tup in rospy.get_published_topics():
 	    topic_name = tup[0]
 	    topic_type = tup[1]
-	    
+
 	    if topic_name not in blacklist_topics:
 	       msg.topic_id = self.sub_ids
-	       self.sub_ids+=1   
+	       self.sub_ids+=1
 	       msg.topic_name = topic_name
 	       msg.message_type = topic_type
 	       pkg, msg_name = topic_type.split('/')
 	       self.message = load_message(pkg, msg_name)
                msg.md5sum = self.message._md5sum
-	
+
 	       sub = Subscriber(msg, self)
                self.subscribers[msg.topic_name] = sub
                self.setSubscribeSize(msg.buffer_size)
                rospy.loginfo("Setup subscriber on %s [%s]" % (msg.topic_name, msg.message_type) )
-    
+
     def setupPublisher(self, data):
         ''' Request to negotiate topics'''
-	
+
 	if len(data)==0:
             rospy.loginfo("Got request for topics!")
             self.requestSyncTime()
@@ -619,9 +660,9 @@ class BidirectionalNode:
 
     def negotiateTopics(self):
         self.port.flushInput()
-	outgoing_prefix = '/' + socket.gethostname() 
+	outgoing_prefix = '/' + socket.gethostname()
         # publishers on this side require subscribers on the other, and viceversa
-        
+
 	ti = TopicInfo()
         """
 	# This is meant to sync subscribers if publishers are set up locally.

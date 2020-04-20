@@ -1,0 +1,3 @@
+subscribers:
+    "/example0/cmd_vel" : "geometry_msgs/Twist"
+    "/example1/cmd_vel" : "geometry_msgs/Twist"

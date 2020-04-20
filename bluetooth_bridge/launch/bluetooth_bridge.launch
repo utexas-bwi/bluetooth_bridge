@@ -1,0 +1,10 @@
+<launch>
+    <arg name="share_all_topics" default="True"/>
+    <arg name="shared_topics_file" default="$(find bluetooth_bridge)/config/shared_topics.yaml"/>
+
+    <node pkg="bluetooth_bridge" name="bidirectional_serial_node" type="bidirectional_serial_node.py" output="screen">
+        <param name="share_all_topics" value="$(arg share_all_topics)"/>
+        <param name="shared_topics_file" value="$(arg shared_topics_file)" />
+    </node>
+
+</launch>
