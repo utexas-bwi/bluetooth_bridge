@@ -263,6 +263,7 @@ class BidirectionalNode:
                 self.subscribeWhitelist(topic_whitelist)
         self.negotiateTopics()
         self.requestTopics()
+        self.ever_synced = False
         self.lastsync = rospy.Time.now()
 
     def requestTopics(self):
@@ -287,13 +288,13 @@ class BidirectionalNode:
                 if (self.synced == True):
                     rospy.logerr("Lost sync with device, restarting...")
                 else:
-                    rospy.logerr("Unable to sync with device; possible link problem or link software version mismatch such as hydro rosserial_python with groovy Arduino")
-                self.synced = False
-                self.lastsync_lost = rospy.Time.now()
-                self.sendDiagnostics(diagnostic_msgs.msg.DiagnosticStatus.ERROR, "no sync with device")
-                self.negotiateTopics()
-		self.requestTopics()
-                self.lastsync = rospy.Time.now()
+                    rospy.logerr("Unable to sync with other hosts on bridge. There may not be any remotes connected.")
+                    self.synced = False
+                    self.lastsync_lost = rospy.Time.now()
+                    self.sendDiagnostics(diagnostic_msgs.msg.DiagnosticStatus.ERROR, "no sync with remote host")
+                    self.negotiateTopics()
+                    self.requestTopics()
+                    self.lastsync = rospy.Time.now()
             flag = [0,0]
 	    try:
                 flag[0]  = self.port.read(1)
@@ -307,6 +308,8 @@ class BidirectionalNode:
 	    if (flag[0] != '\xff'):
                 continue
             if ( flag[1] != self.protocol_ver):
+                if not self.ever_synced:
+                    continue
                 # clear the  serial port buffer
                 #self.port.flushInput()
                 self.sendDiagnostics(diagnostic_msgs.msg.DiagnosticStatus.ERROR, "Mismatched protocol version in packet: lost sync or rosserial_python is from different ros release than the rosserial client")
@@ -330,9 +333,10 @@ class BidirectionalNode:
             msg_len_checksum = sum(map(ord, msg_len_bytes)) + ord(msg_len_chk)
 
             if msg_len_checksum%256 != 255:
-                rospy.loginfo("wrong checksum for msg length, length %d" %(msg_length))
-                rospy.loginfo("chk is %d" %(ord(msg_len_chk)))
-                #self.port.flushInput()
+                if self.ever_synced:
+                    rospy.loginfo("wrong checksum for msg length, length %d" %(msg_length))
+                    rospy.loginfo("chk is %d" %(ord(msg_len_chk)))
+                    #self.port.flushInput()
                 continue
 
             # topic id (2 bytes)
@@ -354,6 +358,7 @@ class BidirectionalNode:
             checksum = sum(map(ord, topic_id_header) ) + sum(map(ord, msg)) + ord(chk)
 
             if checksum%256 == 255:
+                self.ever_synced = True
                 self.synced = True
                 try:
                     if self.compressed and msg_length>0:
