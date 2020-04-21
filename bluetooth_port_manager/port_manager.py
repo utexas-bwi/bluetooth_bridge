@@ -20,7 +20,7 @@ class BluetoothPortManager:
     def __init__(self):
         self.poll_frequency = 1 #seconds
         self.scan_timeout = 3 #seconds
-        self.address_timeout = 10 #seconds; time, after which an address is considered 'stale'
+        self.address_timeout = 10 #seconds; time, after which a detected mac address is considered 'stale'
         self.clients = [] #who we're serving
         self.servers = [] #who we're connected to
 

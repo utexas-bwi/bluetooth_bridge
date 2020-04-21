@@ -1,57 +1,29 @@
-#!/usr/bin/env python
-
-#####################################################################
-# Software License Agreement (BSD License)
-#
-# Copyright (c) 2011, Willow Garage, Inc.
-# All rights reserved.
-#
-# Redistribution and use in source and binary forms, with or without
-# modification, are permitted provided that the following conditions
-# are met:
-#
-#  * Redistributions of source code must retain the above copyright
-#    notice, this list of conditions and the following disclaimer.
-#  * Redistributions in binary form must reproduce the above
-#    copyright notice, this list of conditions and the following
-#    disclaimer in the documentation and/or other materials provided
-#    with the distribution.
-#  * Neither the name of Willow Garage, Inc. nor the names of its
-#    contributors may be used to endorse or promote products derived
-#    from this software without specific prior written permission.
-#
-# THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
-# "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
-# LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS
-# FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE
-# COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT,
-# INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING,
-# BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
-# LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
-# CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
-# LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN
-# ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
-# POSSIBILITY OF SUCH DAMAGE.
-
-__author__ = "mferguson@willowgarage.com (Michael Ferguson)"
-
+#!/usr/bin/env python2
 import roslib;
 import rospy
 
+import binascii
 import thread
-import multiprocessing
+import threading
 from serial import *
 import StringIO
-
-from std_msgs.msg import Time
+from collections import OrderedDict
+#from std_msgs.msg import Time
 from rosserial_msgs.msg import *
 from rosserial_msgs.srv import *
+from serial_bridge.msg import Time
 
 import diagnostic_msgs.msg
 
 import socket
 import time
 import struct
+import yaml
+
+import zlib
+
+__author__ = "juancamilog@gmail.com (Juan Camilo Gamboa Higuera)"
+__author__ = "maxsvetlik@utexas.edu (Max Svetlik)"
 
 def load_pkg_module(package, directory):
     #check if its in the python path
@@ -79,17 +51,18 @@ def load_message(package, message):
 
 class Publisher:
     """
-        Publisher forwards messages from the serial device to ROS.
+        Publisher forwards messages from the remote device to local ROS.
     """
     def __init__(self, topic_info):
         """ Create a new publisher. """
         self.topic = topic_info.topic_name
+        self.message_type = topic_info.message_type
 
         # find message type
         package, message = topic_info.message_type.split('/')
         self.message = load_message(package, message)
         if self.message._md5sum == topic_info.md5sum:
-            self.publisher = rospy.Publisher(self.topic, self.message)
+            self.publisher = rospy.Publisher(self.topic, self.message, queue_size=1)
         else:
             raise Exception('Checksum does not match: ' + self.message._md5sum + ',' + topic_info.md5sum)
 
@@ -102,31 +75,34 @@ class Publisher:
 
 class Subscriber:
     """
-        Subscriber forwards messages from ROS to the serial device.
+        Subscriber forwards messages from local ROS to the remote device.
     """
 
     def __init__(self, topic_info, parent):
         self.topic = topic_info.topic_name
         self.id = topic_info.topic_id
+        self.message_type = topic_info.message_type
         self.parent = parent
 
         # find message type
         package, message = topic_info.message_type.split('/')
         self.message = load_message(package, message)
         if self.message._md5sum == topic_info.md5sum:
-            self.sub = rospy.Subscriber(self.topic, self.message, self.callback)
+            self.sub = rospy.Subscriber(self.topic, self.message, self.callback, queue_size=1)
         else:
             raise Exception('Checksum does not match: ' + self.message._md5sum + ',' + topic_info.md5sum)
 
     def unregister(self):
         rospy.loginfo("Removing subscriber: %s", self.topic)
-        self.sub.unregister()            
+        self.sub.unregister()
 
     def callback(self, msg):
         """ Forward message to serial device. """
         data_buffer = StringIO.StringIO()
         msg.serialize(data_buffer)
-        self.parent.send(self.id, data_buffer.getvalue())
+        # only send data if the other side is alive
+        if self.parent.synced is not False:
+            self.parent.send(self.id, data_buffer.getvalue())
 
 
 class ServiceServer:
@@ -136,6 +112,7 @@ class ServiceServer:
 
     def __init__(self, topic_info, parent):
         self.topic = topic_info.topic_name
+        self.message_type = topic_info.message_type
         self.parent = parent
 
         # find message type
@@ -152,7 +129,7 @@ class ServiceServer:
 
     def unregister(self):
         rospy.loginfo("Removing service: %s", self.topic)
-        self.service.shutdown()                    
+        self.service.shutdown()
 
     def callback(self, req):
         """ Forward request to serial device. """
@@ -178,6 +155,7 @@ class ServiceClient:
 
     def __init__(self, topic_info, parent):
         self.topic = topic_info.topic_name
+        self.message_type = topic_info.message_type
         self.parent = parent
 
         # find message type
@@ -202,116 +180,22 @@ class ServiceClient:
         resp.serialize(data_buffer)
         self.parent.send(self.id, data_buffer.getvalue())
 
-class RosSerialServer:
-    """
-        RosSerialServer waits for a socket connection then passes itself, forked as a
-        new process, to SerialClient which uses it as a serial port. It continues to listen
-        for additional connections. Each forked process is a new ros node, and proxies ros
-        operations (e.g. publish/subscribe) from its connection to the rest of ros.
-    """
-    def __init__(self, tcp_portnum, fork_server=False):
-        print "Fork_server is: ", fork_server
-        self.tcp_portnum = tcp_portnum
-        self.fork_server = fork_server
-
-    def listen(self):
-        self.serversocket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        #bind the socket to a public host, and a well-known port
-        self.serversocket.bind(("", self.tcp_portnum)) #become a server socket
-        self.serversocket.listen(1)
-
-        while True:
-            #accept connections
-            print "waiting for socket connection"
-            (clientsocket, address) = self.serversocket.accept()
-
-            #now do something with the clientsocket
-            rospy.loginfo("Established a socket connection from %s on port %s" % (address))
-            self.socket = clientsocket
-            self.isConnected = True
-
-            if (self.fork_server == True):	# if configured to launch server in a separate process
-                rospy.loginfo("Forking a socket server process")
-                process = multiprocessing.Process(target=self.startSocketServer, args=(address))
-                process.daemon = True
-                process.start()
-                rospy.loginfo("launched startSocketServer")
-            else:
-                rospy.loginfo("calling startSerialClient")
-                self.startSerialClient()
-                rospy.loginfo("startSerialClient() exited")
-
-    def startSerialClient(self):
-        client = SerialClient(self)
-        try:
-            client.run()
-        except KeyboardInterrupt:
-            pass
-        except RuntimeError:
-            rospy.loginfo("RuntimeError exception caught")
-            self.isConnected = False
-        except socket.error:
-            rospy.loginfo("socket.error exception caught")
-            self.isConnected = False
-        finally:
-            self.socket.close()
-            for sub in client.subscribers.values():
-                sub.unregister()
-            for srv in client.services.values():
-                srv.unregister()
-            #pass
-
-    def startSocketServer(self, port, address):
-        rospy.loginfo("starting ROS Serial Python Node serial_node-%r" % (address,))
-        rospy.init_node("serial_node_%r" % (address,))
-        self.startSerialClient()
-     
-    def flushInput(self):
-         pass
-
-    def write(self, data):
-        if (self.isConnected == False):
-            return
-        length = len(data)
-        totalsent = 0
-
-        while totalsent < length:
-            sent = self.socket.send(data[totalsent:])
-            if sent == 0:
-                raise RuntimeError("RosSerialServer.write() socket connection broken")
-            totalsent = totalsent + sent
-
-    def read(self, rqsted_length):
-        self.msg = ''
-        if (self.isConnected == False):
-            return self.msg
-
-        while len(self.msg) < rqsted_length:
-            chunk = self.socket.recv(rqsted_length - len(self.msg))
-            if chunk == '':
-                raise RuntimeError("RosSerialServer.read() socket connection broken")
-            self.msg = self.msg + chunk
-        return self.msg
-
-    def close(self):
-        self.port.close()
-
-
-class SerialClient:
+class BidirectionalNode:
     """
         ServiceServer responds to requests from the serial device.
     """
 
-    def __init__(self, port=None, baud=57600, timeout=5.0):
+    def __init__(self, port=None, baud=256000, timeout=5.0, compressed=False):
         """ Initialize node, connect to bus, attempt to negotiate topics. """
         self.mutex = thread.allocate_lock()
-
         self.lastsync = rospy.Time(0)
         self.lastsync_lost = rospy.Time(0)
         self.timeout = timeout
         self.synced = False
 
-        self.pub_diagnostics = rospy.Publisher('/diagnostics', diagnostic_msgs.msg.DiagnosticArray)
+        self.compressed = compressed
+
+        self.pub_diagnostics = rospy.Publisher('/diagnostics', diagnostic_msgs.msg.DiagnosticArray, queue_size=1)
 
         if port== None:
             # no port specified, listen for any new port?
@@ -328,9 +212,9 @@ class SerialClient:
                 rospy.signal_shutdown("Error opening serial: %s" % e)
                 raise SystemExit
 
-        self.port.timeout = 0.01  # Edit the port timeout
+        #self.port.timeout = 0.01  # Edit the port timeout
 
-        time.sleep(0.1)           # Wait for ready (patch for Uno)
+        #time.sleep(0.1)           # Wait for ready (patch for Uno)
 
         # hydro introduces protocol ver2 which must match node_handle.h
         # The protocol version is sent as the 2nd sync byte emitted by each end
@@ -338,12 +222,15 @@ class SerialClient:
         self.protocol_ver2 = '\xfe'
         self.protocol_ver = self.protocol_ver2
 
-        self.publishers = dict()  # id:Publishers
+        self.publishers = OrderedDict()  # id:Publishers
         self.subscribers = dict() # topic:Subscriber
         self.services = dict()    # topic:Service
+        self.remote_time = dict() # hostname:time_to_last_timesync
+        self.remote_time_offset = dict() # hostname:time_offset i.e. localtime - remote hostname's time
 
-        self.buffer_out = -1
-        self.buffer_in = -1
+        # TODO determine if these need a definite value and if so, what it is
+        self.buffer_out = 1024
+        self.buffer_in = 1024
 
         self.callbacks = dict()
         # endpoints for creating new pubs/subs
@@ -359,8 +246,28 @@ class SerialClient:
         self.callbacks[TopicInfo.ID_LOG] = self.handleLoggingRequest
         self.callbacks[TopicInfo.ID_TIME] = self.handleTimeRequest
 
-        rospy.sleep(2.0) # TODO
+	self.sub_ids=15
+
+        #rospy.sleep(2.0) # TODO
+
+        # Reason about what local topics get exposed to remote bridges
+        all_topics = rospy.get_param('~share_all_topics', False)
+        if all_topics:
+            rospy.loginfo("share_all_topics set to True. All local topics will be accessible over bluetooth_bridge.")
+            self.subscribeAllPublished()
+        else:
+            topic_whitelist = rospy.get_param('~shared_topics_file', None)
+            if topic_whitelist is None:
+                rospy.logerr("Could not load topic whitelist under bluetooth_bridge/shared_topics. Exiting...")
+                exit(-1)
+
+            rospy.loginfo("Attempting to retrieve shared topic list at " + topic_whitelist)
+            with open(topic_whitelist, 'r') as stream:
+                topic_whitelist = yaml.safe_load(stream)
+                self.subscribeWhitelist(topic_whitelist)
+        self.negotiateTopics()
         self.requestTopics()
+        self.ever_synced = False
         self.lastsync = rospy.Time.now()
 
     def requestTopics(self):
@@ -369,26 +276,46 @@ class SerialClient:
         # request topic sync
         self.port.write("\xff" + self.protocol_ver + "\x00\x00\xff\x00\x00\xff")
 
+    def heartbeat(self):
+        # send time request every timeout period, so the other side knows we are alive
+        self.requestSyncTime()
+        threading.Timer(self.timeout,self.heartbeat).start()
+
     def run(self):
         """ Forward recieved messages to appropriate publisher. """
         data = ''
+        # send time request every timeout period, so the other side knows we are alive
+        threading.Timer(self.timeout,self.heartbeat).start()
+
         while not rospy.is_shutdown():
             if (rospy.Time.now() - self.lastsync).to_sec() > (self.timeout * 3):
                 if (self.synced == True):
                     rospy.logerr("Lost sync with device, restarting...")
                 else:
-                    rospy.logerr("Unable to sync with device; possible link problem or link software version mismatch such as hydro rosserial_python with groovy Arduino")
-                self.lastsync_lost = rospy.Time.now()
-                self.sendDiagnostics(diagnostic_msgs.msg.DiagnosticStatus.ERROR, "no sync with device")
-                self.requestTopics()
-                self.lastsync = rospy.Time.now()
-
+                    rospy.logerr("Unable to sync with other hosts on bridge. There may not be any remotes connected.")
+                    self.synced = False
+                    self.lastsync_lost = rospy.Time.now()
+                    self.sendDiagnostics(diagnostic_msgs.msg.DiagnosticStatus.ERROR, "no sync with remote host")
+                    self.negotiateTopics()
+                    self.requestTopics()
+                    self.lastsync = rospy.Time.now()
             flag = [0,0]
-            flag[0]  = self.port.read(1)
-            if (flag[0] != '\xff'):                
+	    try:
+                flag[0]  = self.port.read(1)
+                flag[1] = self.port.read(1)
+	    except SerialException:
+		rospy.loginfo("Serial exception during serial read. Exiting...")
+		threading.Timer(self.timeout,self.heartbeat).cancel()
+		self.port.close()
+		break
+
+	    if (flag[0] != '\xff'):
                 continue
-            flag[1] = self.port.read(1)
             if ( flag[1] != self.protocol_ver):
+                if not self.ever_synced:
+                    continue
+                # clear the  serial port buffer
+                #self.port.flushInput()
                 self.sendDiagnostics(diagnostic_msgs.msg.DiagnosticStatus.ERROR, "Mismatched protocol version in packet: lost sync or rosserial_python is from different ros release than the rosserial client")
                 rospy.logerr("Mismatched protocol version in packet: lost sync or rosserial_python is from different ros release than the rosserial client")
                 protocol_ver_msgs = {'\xff': 'Rev 0 (rosserial 0.4 and earlier)', '\xfe': 'Rev 1 (rosserial 0.5+)', '\xfd': 'Some future rosserial version'}
@@ -398,6 +325,7 @@ class SerialClient:
                     found_ver_msg = "Protocol version of client is unrecognized"
                 rospy.loginfo("%s, expected %s" % (found_ver_msg, protocol_ver_msgs[self.protocol_ver]))
                 continue
+
             msg_len_bytes = self.port.read(2)
             if len(msg_len_bytes) != 2:
                 continue
@@ -409,8 +337,10 @@ class SerialClient:
             msg_len_checksum = sum(map(ord, msg_len_bytes)) + ord(msg_len_chk)
 
             if msg_len_checksum%256 != 255:
-                rospy.loginfo("wrong checksum for msg length, length %d" %(msg_length))
-                rospy.loginfo("chk is %d" %(ord(msg_len_chk)))
+                if self.ever_synced:
+                    rospy.loginfo("wrong checksum for msg length, length %d" %(msg_length))
+                    rospy.loginfo("chk is %d" %(ord(msg_len_chk)))
+                    #self.port.flushInput()
                 continue
 
             # topic id (2 bytes)
@@ -420,11 +350,11 @@ class SerialClient:
             topic_id, = struct.unpack("<h", topic_id_header)
 
             msg = self.port.read(msg_length)
+
             if (len(msg) != msg_length):
                 self.sendDiagnostics(diagnostic_msgs.msg.DiagnosticStatus.ERROR, "Packet Failed :  Failed to read msg data")
                 rospy.loginfo("Packet Failed :  Failed to read msg data")
                 rospy.loginfo("msg len is %d",len(msg))
-                #self.port.flushInput()
                 continue
 
             # checksum for topic id and msg
@@ -432,11 +362,18 @@ class SerialClient:
             checksum = sum(map(ord, topic_id_header) ) + sum(map(ord, msg)) + ord(chk)
 
             if checksum%256 == 255:
+                self.ever_synced = True
                 self.synced = True
                 try:
-                    self.callbacks[topic_id](msg)
+                    if self.compressed and msg_length>0:
+                        msg = zlib.decompress(msg)
+		    self.callbacks[topic_id](msg)
                 except KeyError:
-                    rospy.logerr("Tried to publish before configured, topic id %d" % topic_id)
+                    rospy.logwarn("Tried to publish before configured, topic id %d" % topic_id)
+                    self.requestTopics()
+                except:
+                    rospy.logerr("Unexpected error: %s",sys.exc_info()[0])
+
                 rospy.sleep(0.001)
 
     def setPublishSize(self, bytes):
@@ -449,13 +386,71 @@ class SerialClient:
             self.buffer_in = bytes
             rospy.loginfo("Note: subscribe buffer size is %d bytes" % self.buffer_in)
 
+    def subscribeWhitelist(self, topic_whitelist):
+        msg = TopicInfo()
+	msg.buffer_size = self.buffer_in
+	blacklist_topics = ['/rosout', '/rosout_agg']
+        if 'subscribers' in topic_whitelist.keys():
+            topics = topic_whitelist['subscribers']
+            for tup in topics.keys():
+                topic_name = tup
+                topic_type = topics[tup]
+
+                if topic_name not in blacklist_topics:
+                   msg.topic_id = self.sub_ids
+                   self.sub_ids+=1
+                   msg.topic_name = topic_name
+                   msg.message_type = topic_type
+                   pkg, msg_name = topic_type.split('/')
+                   self.message = load_message(pkg, msg_name)
+                   msg.md5sum = self.message._md5sum
+
+                   sub = Subscriber(msg, self)
+                   self.subscribers[msg.topic_name] = sub
+                   self.setSubscribeSize(msg.buffer_size)
+                   rospy.loginfo("Setup subscriber on %s [%s]" % (msg.topic_name, msg.message_type) )
+
+
+    def subscribeAllPublished(self):
+	msg = TopicInfo()
+	msg.buffer_size = self.buffer_in
+	blacklist_topics = ['/rosout', '/rosout_agg']
+        for tup in rospy.get_published_topics():
+	    topic_name = tup[0]
+	    topic_type = tup[1]
+
+	    if topic_name not in blacklist_topics:
+	       msg.topic_id = self.sub_ids
+	       self.sub_ids+=1
+	       msg.topic_name = topic_name
+	       msg.message_type = topic_type
+	       pkg, msg_name = topic_type.split('/')
+	       self.message = load_message(pkg, msg_name)
+               msg.md5sum = self.message._md5sum
+
+	       sub = Subscriber(msg, self)
+               self.subscribers[msg.topic_name] = sub
+               self.setSubscribeSize(msg.buffer_size)
+               rospy.loginfo("Setup subscriber on %s [%s]" % (msg.topic_name, msg.message_type) )
+
     def setupPublisher(self, data):
+        ''' Request to negotiate topics'''
+
+	if len(data)==0:
+            rospy.loginfo("Got request for topics!")
+            self.requestSyncTime()
+            self.negotiateTopics()
+            return
+
         """ Register a new publisher. """
         try:
             msg = TopicInfo()
             msg.deserialize(data)
+            if msg.topic_name in self.publishers.keys():
+                rospy.loginfo("Publisher exists on %s [%s]" % (msg.topic_name, msg.message_type) )
+                return
             pub = Publisher(msg)
-            self.publishers[msg.topic_id] = pub
+            self.publishers[msg.topic_name] = pub
             self.callbacks[msg.topic_id] = pub.handlePacket
             self.setPublishSize(msg.buffer_size)
             rospy.loginfo("Setup publisher on %s [%s]" % (msg.topic_name, msg.message_type) )
@@ -465,8 +460,12 @@ class SerialClient:
     def setupSubscriber(self, data):
         """ Register a new subscriber. """
         try:
+	    rospy.loginfo("Setting up a Subscriber!")
             msg = TopicInfo()
             msg.deserialize(data)
+            if msg.topic_name in self.subscribers.keys():
+                rospy.loginfo("Subscriber exists on %s [%s]" % (msg.topic_name, msg.message_type) )
+                return
             sub = Subscriber(msg, self)
             self.subscribers[msg.topic_name] = sub
             self.setSubscribeSize(msg.buffer_size)
@@ -529,6 +528,7 @@ class SerialClient:
                 raise Exception('Checksum does not match: ' + srv.mreq._md5sum + ',' + msg.md5sum)
         except Exception as e:
             rospy.logerr("Creation of service client failed: %s", e)
+
     def setupServiceClientSubscriber(self, data):
         """ Register a new service client. """
         try:
@@ -550,12 +550,31 @@ class SerialClient:
 
     def handleTimeRequest(self, data):
         """ Respond to device with system time. """
+        now = rospy.Time.now()
         t = Time()
-        t.data = rospy.Time.now()
-        data_buffer = StringIO.StringIO()
-        t.serialize(data_buffer)
-        self.send( TopicInfo.ID_TIME, data_buffer.getvalue() )
-        self.lastsync = rospy.Time.now()
+        t.deserialize(data)
+
+        # if Time message empty, it's actually a request. Send own Time message to remote
+        if t.time.data.secs == 0 and t.time.data.nsecs == 0:
+            t = Time()
+            t.hostname.data = socket.gethostname()
+            t.time.data = rospy.Time.now()
+            data_buffer = StringIO.StringIO()
+            t.serialize(data_buffer)
+            self.send( TopicInfo.ID_TIME, data_buffer.getvalue() )
+            self.lastsync = rospy.Time.now()
+        else:
+            #Note: this captures both difference in ROS Time and time over the wire. As such
+            # it may not be adequate for applications where tight synchronization is neeeded
+            self.remote_time[t.hostname.data] = t.time.data
+            self.remote_time_offset[t.hostname.data] = t.time.data - now #note: this results in a Duration
+
+            #TODO Time offset is captured but not applied anywhere...
+
+            rospy.logdebug("Time offset from remote " + t.hostname.data + ": " + str(self.remote_time_offset[t.hostname.data].to_sec()))
+            self.lastsync = now
+            pass
+
 
     def handleParameterRequest(self, data):
         """ Send parameters to device. Supports only simple datatypes and arrays of such. """
@@ -609,6 +628,8 @@ class SerialClient:
             rospy.logfatal(msg.msg)
 
     def send(self, topic, msg):
+        if self.compressed:
+            msg = zlib.compress(msg,4)
         """ Send a message on a particular topic to the device. """
         with self.mutex:
             length = len(msg)
@@ -648,4 +669,66 @@ class SerialClient:
         status.values[1].value=time.ctime(self.lastsync_lost.to_sec())
 
         self.pub_diagnostics.publish(msg)
+
+    def requestSyncTime(self):
+        t = Time()
+        data_buffer = StringIO.StringIO()
+        t.serialize(data_buffer)
+        self.send(TopicInfo.ID_TIME, data_buffer.getvalue())
+
+    def negotiateTopics(self):
+        self.port.flushInput()
+	outgoing_prefix = '/' + socket.gethostname()
+        # publishers on this side require subscribers on the other, and viceversa
+
+	ti = TopicInfo()
+        """
+	# This is meant to sync subscribers if publishers are set up locally.
+	# This functionality should be implemented in the future, however it does not currently work as intended
+	# Current practice is to set up subscribers locally which syncs Pubs on the remote
+	for p_id in self.publishers.keys():
+            p = self.publishers[p_id]
+	    ti.topic_id = p_id
+            ti.topic_name = p.topic
+            ti.message_type = p.message_type
+            ti.md5sum = p.message._md5sum
+            ti.buffer_size = self.buffer_out
+            _buffer = StringIO.StringIO()
+            ti.serialize(_buffer)
+            self.send(TopicInfo.ID_SUBSCRIBER,_buffer.getvalue())
+            time.sleep(0.01)
+	"""
+        for s_name in self.subscribers.keys():
+            s = self.subscribers[s_name]
+            ti.topic_id = s.id
+            ti.topic_name = outgoing_prefix+s.topic
+            ti.message_type = s.message_type
+            ti.md5sum = s.message._md5sum
+            ti.buffer_size = self.buffer_in
+            _buffer = StringIO.StringIO()
+            ti.serialize(_buffer)
+            self.send(TopicInfo.ID_PUBLISHER,_buffer.getvalue())
+            time.sleep(0.01)
+
+        # service clients on this side require service servers on the other, and viceversa
+        for s_name in self.services.keys():
+            s = self.services[s_name]
+            ti.topic_id = s.topic_id
+            ti.topic_name = s.topic
+            ti.message_type = s.message_type
+            ti.md5sum = s.message._md5sum
+            ti.buffer_size = self.buffer_in
+
+            _buffer = StringIO.StringIO()
+            ti.serialize(_buffer)
+
+            if s.__class__.__name__ == 'ServiceClient':
+                self.send(TopicInfo.ID_SERVICE_SERVER+TopicInfo.ID_PUBLISHER,_buffer.getvalue())
+                self.send(TopicInfo.ID_SERVICE_SERVER+TopicInfo.ID_SUBSCRIBER,_buffer.getvalue())
+            if s.__class__.__name__ == 'ServiceServer':
+                self.send(TopicInfo.ID_SERVICE_CLIENT+TopicInfo.ID_PUBLISHER,_buffer.getvalue())
+                self.send(TopicInfo.ID_SERVICE_CLIENT+TopicInfo.ID_SUBSCRIBER,_buffer.getvalue())
+            time.sleep(0.01)
+
+        pass
 

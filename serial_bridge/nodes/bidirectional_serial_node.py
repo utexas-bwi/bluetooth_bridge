@@ -37,10 +37,10 @@ __author__ = "mferguson@willowgarage.com (Michael Ferguson)"
 __author__ = "maxsvetlik@utexas.edu (Max Svetlik)"
 
 import rospy
-from bluetooth_bridge import BidirectionalNode
+from serial_bridge import BidirectionalNode
 
 import sys
-   
+
 if __name__=="__main__":
 
     rospy.init_node("bidirectional_serial_node")
