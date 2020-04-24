@@ -1,0 +1,10 @@
+<launch>
+    <!-- shares all local topics over the bridge OR only the ones in the `shared_topics_file` -->
+    <arg name="share_all_topics" default="False"/>
+    <arg name="shared_topics_path" default="$(find serial_bridge)/config/demo_topics.yaml"/>
+    <param name="/serial_bridge/share_all_topics" value="$(arg share_all_topics)"/>
+    <param name="/serial_bridge/shared_topics_path" value="$(arg shared_topics_path)" />
+
+    <node pkg="serial_bridge" name="port_manager_interface" type="port_manager_interface.py" output="screen"/>
+
+</launch>

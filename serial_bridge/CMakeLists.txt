@@ -22,6 +22,6 @@ generate_messages(
 
 catkin_package()
 
-install(PROGRAMS nodes/serial_node.py nodes/message_info_service.py nodes/bidirectional_serial_node.py
+install(PROGRAMS nodes/serial_node.py nodes/message_info_service.py nodes/bidirectional_serial_node.py nodes/port_manager_interface.py
   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
 )

@@ -1,8 +1,8 @@
 <package>
-  <name>serial_bridge</name>
+  <name>bluetooth_port_manager</name>
   <version>0.0.1</version>
   <description>
-    A Python-based, serial bridge facilitator for relaying ROS messages over a serial socket. Intented specifically for communication of two full Linux machines over bluetooth.
+      A Python-based, bluetooth scanner that mutually coordinates serial connections between bluetooth devices. 
   </description>
   <author>Max Svetlik</author>
   <maintainer email="maxsvetlik@utexas.edu">Max Svetlik</maintainer>
@@ -10,13 +10,10 @@
   <url></url>
 
   <buildtool_depend>catkin</buildtool_depend>
-  <build_depend>message_generation</build_depend>
   
   <run_depend>rospy</run_depend>
   <run_depend>rosserial_msgs</run_depend>
   <run_depend>diagnostic_msgs</run_depend>
-  <run_depend>python-bluez</run_depend>
   <run_depend>python-serial</run_depend>
-  <run_depend>python-yaml</run_depend>
   <run_depend>message_runtime</run_depend>
 </package>

@@ -1,0 +1,18 @@
+<package format="2">
+  <name>bluetooth_bridge</name>
+  <version>0.0.1</version>
+  <description>
+    Metapackage for multi-agent bluetooth serial ROS communication system.
+  </description> 
+  <license>BSD</license>
+
+  <author email="maxsvetlik@utexas.edu">Max Svetlik</author>
+  <maintainer email="maxsvetlik@utexas.edu">Max Svetlik</maintainer>
+
+  <buildtool_depend>catkin</buildtool_depend>
+  <export>
+    <metapackage/>
+    <architecture_independent/>
+  </export>
+
+</package>

@@ -1,14 +1,11 @@
-#!/usr/bin/env python2
+#!/usr/bin/env python3.5
 import roslib;
 import rospy
 
-import binascii
-import thread
 import threading
 from serial import *
 import StringIO
 from collections import OrderedDict
-#from std_msgs.msg import Time
 from rosserial_msgs.msg import *
 from rosserial_msgs.srv import *
 from serial_bridge.msg import Time
@@ -185,9 +182,9 @@ class BidirectionalNode:
         ServiceServer responds to requests from the serial device.
     """
 
-    def __init__(self, port=None, baud=256000, timeout=5.0, compressed=False):
+    def __init__(self, port=None, baud=1000000, timeout=5.0, compressed=False):
         """ Initialize node, connect to bus, attempt to negotiate topics. """
-        self.mutex = thread.allocate_lock()
+        self.mutex = threading.Lock()
         self.lastsync = rospy.Time(0)
         self.lastsync_lost = rospy.Time(0)
         self.timeout = timeout
@@ -200,7 +197,7 @@ class BidirectionalNode:
         if port== None:
             # no port specified, listen for any new port?
             pass
-        elif hasattr(port, 'read'):
+        elif hasattr(port, 'recv') or hasattr(port, 'read'):
             #assume its a filelike object
             self.port=port
         else:
@@ -213,8 +210,6 @@ class BidirectionalNode:
                 raise SystemExit
 
         #self.port.timeout = 0.01  # Edit the port timeout
-
-        #time.sleep(0.1)           # Wait for ready (patch for Uno)
 
         # hydro introduces protocol ver2 which must match node_handle.h
         # The protocol version is sent as the 2nd sync byte emitted by each end
@@ -246,25 +241,25 @@ class BidirectionalNode:
         self.callbacks[TopicInfo.ID_LOG] = self.handleLoggingRequest
         self.callbacks[TopicInfo.ID_TIME] = self.handleTimeRequest
 
-	self.sub_ids=15
-
-        #rospy.sleep(2.0) # TODO
+        self.sub_ids=15
+        self.shutdown = False
 
         # Reason about what local topics get exposed to remote bridges
-        all_topics = rospy.get_param('~share_all_topics', False)
+        all_topics = rospy.get_param('/serial_bridge/share_all_topics', False)
         if all_topics:
             rospy.loginfo("share_all_topics set to True. All local topics will be accessible over bluetooth_bridge.")
             self.subscribeAllPublished()
         else:
-            topic_whitelist = rospy.get_param('~shared_topics_file', None)
+            topic_whitelist = rospy.get_param('/serial_bridge/shared_topics_path', None)
             if topic_whitelist is None:
-                rospy.logerr("Could not load topic whitelist under bluetooth_bridge/shared_topics. Exiting...")
-                exit(-1)
+                rospy.logerr("Could not load topic whitelist under bluetooth_bridge/shared_topics.")
 
             rospy.loginfo("Attempting to retrieve shared topic list at " + topic_whitelist)
             with open(topic_whitelist, 'r') as stream:
                 topic_whitelist = yaml.safe_load(stream)
                 self.subscribeWhitelist(topic_whitelist)
+
+
         self.negotiateTopics()
         self.requestTopics()
         self.ever_synced = False
@@ -272,14 +267,30 @@ class BidirectionalNode:
 
     def requestTopics(self):
         """ Determine topics to subscribe/publish. """
-        self.port.flushInput()
+        #self.port.flushInput()
         # request topic sync
-        self.port.write("\xff" + self.protocol_ver + "\x00\x00\xff\x00\x00\xff")
+        if hasattr(self.port, 'write'):
+            self.port.write("\xff" + self.protocol_ver + "\x00\x00\xff\x00\x00\xff")
+        if hasattr(self.port, 'send'):
+            self.port.send("\xff" + self.protocol_ver + "\x00\x00\xff\x00\x00\xff")
+
 
     def heartbeat(self):
         # send time request every timeout period, so the other side knows we are alive
         self.requestSyncTime()
-        threading.Timer(self.timeout,self.heartbeat).start()
+        if not self.shutdown:
+            threading.Timer(self.timeout,self.heartbeat).start()
+
+    def shutdown_node(self):
+        self.shutdown = True
+
+    def set_port(self, port):
+        self.port = port
+
+    def close_port(self):
+        if self.port is not None:
+            self.port.close()
+        self.port = None
 
     def run(self):
         """ Forward recieved messages to appropriate publisher. """
@@ -287,7 +298,10 @@ class BidirectionalNode:
         # send time request every timeout period, so the other side knows we are alive
         threading.Timer(self.timeout,self.heartbeat).start()
 
-        while not rospy.is_shutdown():
+        while not rospy.is_shutdown() and not self.shutdown:
+            if self.port is None:
+                rospy.sleep(0.05)
+                continue
             if (rospy.Time.now() - self.lastsync).to_sec() > (self.timeout * 3):
                 if (self.synced == True):
                     rospy.logerr("Lost sync with device, restarting...")
@@ -299,17 +313,18 @@ class BidirectionalNode:
                     self.negotiateTopics()
                     self.requestTopics()
                     self.lastsync = rospy.Time.now()
-            flag = [0,0]
-	    try:
-                flag[0]  = self.port.read(1)
-                flag[1] = self.port.read(1)
-	    except SerialException:
-		rospy.loginfo("Serial exception during serial read. Exiting...")
-		threading.Timer(self.timeout,self.heartbeat).cancel()
-		self.port.close()
-		break
 
-	    if (flag[0] != '\xff'):
+            # assumption: if flag is in read queue, entire message in queue
+            # so only need to explicity check if port is open here
+            flag = [0,0]
+            flag[0] = self.read(1)
+            if flag[0] is not None:
+                flag[1] = self.read(1)
+            else:
+                self.shutdown = True
+                continue
+
+            if (flag[0] != '\xff'):
                 continue
             if ( flag[1] != self.protocol_ver):
                 if not self.ever_synced:
@@ -325,15 +340,24 @@ class BidirectionalNode:
                     found_ver_msg = "Protocol version of client is unrecognized"
                 rospy.loginfo("%s, expected %s" % (found_ver_msg, protocol_ver_msgs[self.protocol_ver]))
                 continue
+            msg_len_bytes = None
+            if hasattr(self.port, 'read'):
+                msg_len_bytes = self.port.read(2)
+            elif hasattr(self.port, 'recv'):
+                msg_len_bytes = self.port.recv(2)
 
-            msg_len_bytes = self.port.read(2)
             if len(msg_len_bytes) != 2:
                 continue
 
             msg_length, = struct.unpack("<h", msg_len_bytes)
 
             # checksum of msg_len
-            msg_len_chk = self.port.read(1)
+            msg_len_chk = None
+            if hasattr(self.port, 'read'):
+                msg_len_chk = self.port.read(1)
+            elif hasattr(self.port, 'recv'):
+                msg_len_chk = self.port.recv(1)
+
             msg_len_checksum = sum(map(ord, msg_len_bytes)) + ord(msg_len_chk)
 
             if msg_len_checksum%256 != 255:
@@ -344,12 +368,21 @@ class BidirectionalNode:
                 continue
 
             # topic id (2 bytes)
-            topic_id_header = self.port.read(2)
+            topic_id_header = None
+            if hasattr(self.port, 'read'):
+                topic_id_header = self.port.read(2)
+            elif hasattr(self.port, 'recv'):
+                topic_id_header = self.port.recv(2)
             if len(topic_id_header)!=2:
                 continue
             topic_id, = struct.unpack("<h", topic_id_header)
 
-            msg = self.port.read(msg_length)
+            msg = None
+            if hasattr(self.port, 'read'):
+                msg = self.port.read(msg_length)
+            elif hasattr(self.port, 'recv'):
+                msg = self.port.recv(msg_length)
+
 
             if (len(msg) != msg_length):
                 self.sendDiagnostics(diagnostic_msgs.msg.DiagnosticStatus.ERROR, "Packet Failed :  Failed to read msg data")
@@ -358,16 +391,19 @@ class BidirectionalNode:
                 continue
 
             # checksum for topic id and msg
-            chk = self.port.read(1)
-            checksum = sum(map(ord, topic_id_header) ) + sum(map(ord, msg)) + ord(chk)
+            if hasattr(self.port, 'read'):
+                chk = self.port.read(1)
+            if hasattr(self.port, 'recv'):
+                chk = self.port.recv(1)
 
+            checksum = sum(map(ord, topic_id_header) ) + sum(map(ord, msg)) + ord(chk)
             if checksum%256 == 255:
                 self.ever_synced = True
                 self.synced = True
                 try:
                     if self.compressed and msg_length>0:
                         msg = zlib.decompress(msg)
-		    self.callbacks[topic_id](msg)
+                    self.callbacks[topic_id](msg)
                 except KeyError:
                     rospy.logwarn("Tried to publish before configured, topic id %d" % topic_id)
                     self.requestTopics()
@@ -375,6 +411,8 @@ class BidirectionalNode:
                     rospy.logerr("Unexpected error: %s",sys.exc_info()[0])
 
                 rospy.sleep(0.001)
+        rospy.loginfo("Exiting")
+        self.close_port()
 
     def setPublishSize(self, bytes):
         if self.buffer_out < 0:
@@ -388,8 +426,8 @@ class BidirectionalNode:
 
     def subscribeWhitelist(self, topic_whitelist):
         msg = TopicInfo()
-	msg.buffer_size = self.buffer_in
-	blacklist_topics = ['/rosout', '/rosout_agg']
+        msg.buffer_size = self.buffer_in
+        blacklist_topics = ['/rosout', '/rosout_agg']
         if 'subscribers' in topic_whitelist.keys():
             topics = topic_whitelist['subscribers']
             for tup in topics.keys():
@@ -412,23 +450,23 @@ class BidirectionalNode:
 
 
     def subscribeAllPublished(self):
-	msg = TopicInfo()
-	msg.buffer_size = self.buffer_in
-	blacklist_topics = ['/rosout', '/rosout_agg']
+        msg = TopicInfo()
+        msg.buffer_size = self.buffer_in
+        blacklist_topics = ['/rosout', '/rosout_agg']
         for tup in rospy.get_published_topics():
-	    topic_name = tup[0]
-	    topic_type = tup[1]
+            topic_name = tup[0]
+            topic_type = tup[1]
 
-	    if topic_name not in blacklist_topics:
-	       msg.topic_id = self.sub_ids
-	       self.sub_ids+=1
-	       msg.topic_name = topic_name
-	       msg.message_type = topic_type
-	       pkg, msg_name = topic_type.split('/')
-	       self.message = load_message(pkg, msg_name)
+            if topic_name not in blacklist_topics:
+               msg.topic_id = self.sub_ids
+               self.sub_ids+=1
+               msg.topic_name = topic_name
+               msg.message_type = topic_type
+               pkg, msg_name = topic_type.split('/')
+               self.message = load_message(pkg, msg_name)
                msg.md5sum = self.message._md5sum
 
-	       sub = Subscriber(msg, self)
+               sub = Subscriber(msg, self)
                self.subscribers[msg.topic_name] = sub
                self.setSubscribeSize(msg.buffer_size)
                rospy.loginfo("Setup subscriber on %s [%s]" % (msg.topic_name, msg.message_type) )
@@ -436,7 +474,7 @@ class BidirectionalNode:
     def setupPublisher(self, data):
         ''' Request to negotiate topics'''
 
-	if len(data)==0:
+        if len(data)==0:
             rospy.loginfo("Got request for topics!")
             self.requestSyncTime()
             self.negotiateTopics()
@@ -460,7 +498,7 @@ class BidirectionalNode:
     def setupSubscriber(self, data):
         """ Register a new subscriber. """
         try:
-	    rospy.loginfo("Setting up a Subscriber!")
+            rospy.loginfo("Setting up a Subscriber!")
             msg = TopicInfo()
             msg.deserialize(data)
             if msg.topic_name in self.subscribers.keys():
@@ -627,6 +665,17 @@ class BidirectionalNode:
         elif(msg.level==Log.FATAL):
             rospy.logfatal(msg.msg)
 
+    def read(self, num_bytes):
+        ret = None
+        try:
+            if hasattr(self.port, 'read'):
+                ret  = self.port.read(num_bytes)
+            elif hasattr(self.port, 'recv'):
+                ret = self.port.recv(num_bytes)
+        except:
+            rospy.logwarn("Read from port failed. It's likely closed.")
+        return ret
+
     def send(self, topic, msg):
         if self.compressed:
             msg = zlib.compress(msg,4)
@@ -635,7 +684,7 @@ class BidirectionalNode:
             length = len(msg)
             if self.buffer_in > 0 and length > self.buffer_in:
                 rospy.logerr("Message from ROS network dropped: message larger than buffer.")
-                print msg
+                print(msg)
                 return -1
             else:
                 #modified frame : header(2 bytes) + msg_len(2 bytes) + msg_len_chk(1 byte) + topic_id(2 bytes) + msg(x bytes) + msg_topic_id_chk(1 byte)
@@ -644,7 +693,15 @@ class BidirectionalNode:
                 msg_checksum = 255 - ( ((topic&255) + (topic>>8) + sum([ord(x) for x in msg]))%256 )
                 data = "\xff" + self.protocol_ver  + chr(length&255) + chr(length>>8) + chr(msg_len_checksum) + chr(topic&255) + chr(topic>>8)
                 data = data + msg + chr(msg_checksum)
-                self.port.write(data)
+                if hasattr(self.port, 'write'):
+                    self.port.write(data)
+                elif hasattr(self.port, 'send'):
+                    try:
+                        self.port.send(data)
+                    except:
+                        rospy.logwarn("Unable to send data over socket. Endpoint not connected. Socket likely closed. Resetting socket")
+                        #TODO unregister any subscribers?
+                        self.close_port()
                 return length
 
     def sendDiagnostics(self, level, msg_text):
@@ -677,18 +734,18 @@ class BidirectionalNode:
         self.send(TopicInfo.ID_TIME, data_buffer.getvalue())
 
     def negotiateTopics(self):
-        self.port.flushInput()
-	outgoing_prefix = '/' + socket.gethostname()
+        #self.port.flushInput()
+        outgoing_prefix = '/' + socket.gethostname()
         # publishers on this side require subscribers on the other, and viceversa
 
-	ti = TopicInfo()
+        ti = TopicInfo()
         """
-	# This is meant to sync subscribers if publishers are set up locally.
-	# This functionality should be implemented in the future, however it does not currently work as intended
-	# Current practice is to set up subscribers locally which syncs Pubs on the remote
-	for p_id in self.publishers.keys():
+        # This is meant to sync subscribers if publishers are set up locally.
+        # This functionality should be implemented in the future, however it does not currently work as intended
+        # Current practice is to set up subscribers locally which syncs Pubs on the remote
+        for p_id in self.publishers.keys():
             p = self.publishers[p_id]
-	    ti.topic_id = p_id
+            ti.topic_id = p_id
             ti.topic_name = p.topic
             ti.message_type = p.message_type
             ti.md5sum = p.message._md5sum
@@ -697,7 +754,7 @@ class BidirectionalNode:
             ti.serialize(_buffer)
             self.send(TopicInfo.ID_SUBSCRIBER,_buffer.getvalue())
             time.sleep(0.01)
-	"""
+        """
         for s_name in self.subscribers.keys():
             s = self.subscribers[s_name]
             ti.topic_id = s.id

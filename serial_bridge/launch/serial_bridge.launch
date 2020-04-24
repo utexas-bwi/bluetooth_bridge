@@ -1,11 +1,11 @@
 <launch>
     <!-- shares all local topics over the bridge OR only the ones in the `shared_topics_file` -->
     <arg name="share_all_topics" default="False"/>
-    <arg name="shared_topics_file" default="$(find serial_bridge)/config/demo_topics.yaml"/>
+    <arg name="shared_topics_path" default="$(find serial_bridge)/config/navigation_topics.yaml"/>
+    
+    <param name="/serial_bridge/share_all_topics" value="$(arg share_all_topics)"/>
+    <param name="/serial_bridge/shared_topics_path" value="$(arg shared_topics_file)" />
 
-    <node pkg="serial_bridge" name="bidirectional_serial_node" type="bidirectional_serial_node.py" output="screen">
-        <param name="share_all_topics" value="$(arg share_all_topics)"/>
-        <param name="shared_topics_file" value="$(arg shared_topics_file)" />
-    </node>
+    <node pkg="serial_bridge" name="bidirectional_serial_node" type="bidirectional_serial_node.py" output="screen"/>
 
 </launch>

@@ -18,6 +18,10 @@ In order to set permissions to give python access to system level bluetooth cont
 
 NOTE: the above is necessary when creating serial port objects. Since the utilization of system calls, running the `Manager` with sudo is required anyway.
 
+Finally, install the library locally. In the root of the project run
+
+   $ pip install -e . --no-deps
+
 ## How to Use
 
 ### Fill in the whitelist
