@@ -38,8 +38,9 @@ __author__ = "maxsvetlik@utexas.edu (Max Svetlik)"
 
 import rospy
 from serial_bridge import BidirectionalNode
-
 import sys
+
+""" This node is an example of how to run the BidirectionalNode with a virtual Linux port connection """
 
 if __name__=="__main__":
 

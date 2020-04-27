@@ -22,6 +22,22 @@ import zlib
 __author__ = "juancamilog@gmail.com (Juan Camilo Gamboa Higuera)"
 __author__ = "maxsvetlik@utexas.edu (Max Svetlik)"
 
+"""
+BidirectionalNode describes a serial bridge for ROS message and service communication between two full desktop systems.
+This is different than most ROS serial library packages that expect one side of the communcation to be a microcontroller.
+As such, running it on two full desktop systems has many advantages over a microcontroller.
+
+The method in which the serial connection is initiated is outside of the scope of this program, and is left to other
+libraries associated with this package.
+
+This bridge assumes that the serial connection is made and that the local 'host' and remote are each running a BidirectionalNode bridge.
+
+
+This code is an extension of a [fork](https://github.com/juancamilog/rosserial-mrl/tree/master/rosserial_python) in 2013 by
+Juan Camilo Gamboa which itself is an extension of rosserial_python by Michael Ferguson. This code is an extension of
+those projects as premitted by the BSD license they are released under.
+"""
+
 def load_pkg_module(package, directory):
     #check if its in the python path
     in_path = False
@@ -276,24 +292,32 @@ class BidirectionalNode:
 
 
     def heartbeat(self):
-        # send time request every timeout period, so the other side knows we are alive
+        """ send time request every timeout period, so the other side knows we are alive """
+
         self.requestSyncTime()
         if not self.shutdown:
             threading.Timer(self.timeout,self.heartbeat).start()
 
     def shutdown_node(self):
+        """ Raises the shutdown flag to exit main thread loop """
+
         self.shutdown = True
 
     def set_port(self, port):
+        """ Set the port. Expected to be a serial, file-like descriptor """
+
         self.port = port
 
     def close_port(self):
+        """ Closes port if it exists, otherwise sets to None for control logic in main loop """
+
         if self.port is not None:
             self.port.close()
         self.port = None
 
     def run(self):
         """ Forward recieved messages to appropriate publisher. """
+
         data = ''
         # send time request every timeout period, so the other side knows we are alive
         threading.Timer(self.timeout,self.heartbeat).start()
@@ -415,16 +439,21 @@ class BidirectionalNode:
         self.close_port()
 
     def setPublishSize(self, bytes):
+        """ Sets Publisher buffer size """
+
         if self.buffer_out < 0:
             self.buffer_out = bytes
             rospy.loginfo("Note: publish buffer size is %d bytes" % self.buffer_out)
 
     def setSubscribeSize(self, bytes):
+        """ Sets Subscriber buffer size """
+
         if self.buffer_in < 0:
             self.buffer_in = bytes
             rospy.loginfo("Note: subscribe buffer size is %d bytes" % self.buffer_in)
 
     def subscribeWhitelist(self, topic_whitelist):
+        """ Sets up local subscribers on topics as specified in the topic whitelist """
         msg = TopicInfo()
         msg.buffer_size = self.buffer_in
         blacklist_topics = ['/rosout', '/rosout_agg']
@@ -450,6 +479,8 @@ class BidirectionalNode:
 
 
     def subscribeAllPublished(self):
+        """ Sets up local subscribers for every topic that is currently published at the time the function is called. """
+
         msg = TopicInfo()
         msg.buffer_size = self.buffer_in
         blacklist_topics = ['/rosout', '/rosout_agg']
@@ -666,11 +697,12 @@ class BidirectionalNode:
             rospy.logfatal(msg.msg)
 
     def read(self, num_bytes):
+        """ Determine how to read bytes depending on what type of serial port is being used """
         ret = None
         try:
-            if hasattr(self.port, 'read'):
+            if hasattr(self.port, 'read'): # virtual port
                 ret  = self.port.read(num_bytes)
-            elif hasattr(self.port, 'recv'):
+            elif hasattr(self.port, 'recv'): # Bluetooth Serial wrapper
                 ret = self.port.recv(num_bytes)
         except:
             rospy.logwarn("Read from port failed. It's likely closed.")
@@ -705,6 +737,8 @@ class BidirectionalNode:
                 return length
 
     def sendDiagnostics(self, level, msg_text):
+        """ Send diagnostic messages """
+
         msg = diagnostic_msgs.msg.DiagnosticArray()
         status = diagnostic_msgs.msg.DiagnosticStatus()
         status.name = "rosserial_python"
@@ -728,12 +762,15 @@ class BidirectionalNode:
         self.pub_diagnostics.publish(msg)
 
     def requestSyncTime(self):
+        """ Request Time update from remote """
+
         t = Time()
         data_buffer = StringIO.StringIO()
         t.serialize(data_buffer)
         self.send(TopicInfo.ID_TIME, data_buffer.getvalue())
 
     def negotiateTopics(self):
+        """ Upon receiving input from remote across bridge, set up corresponding internal structures to make the data available locally. """
         #self.port.flushInput()
         outgoing_prefix = '/' + socket.gethostname()
         # publishers on this side require subscribers on the other, and viceversa

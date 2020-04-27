@@ -1,26 +1,45 @@
 #!/usr/bin/env python
 
 from bluetooth_port_manager import BluetoothPortManager
+import rospy
+import rospkg
 from serial_bridge import BidirectionalNode
 import time
 import threading
-import rospy
-import rospkg
+
+__author__ = "maxsvetlik@utexas.edu (Max Svetlik)"
 
 class PortManagerInterface:
-    def __init__(self):
+    """
+    A ROS interface between the BluetoothPortManager library and a BidirectionalSerialNode.
+
+    This class manages the resources exposed by BluetoothPortManager lib and spins up Bidirectional Bridge Nodes
+    for remote connections. If a connection has been closed by a bridge, it notifies the PortManager.
+
+    Parameters:
+    poll_rate (float): How often to update local resources from the BluetoothPortManager instance, in seconds
+
+
+    ROS Parameters:
+    /serial_bridge/shared_topics_path (string) : ROSParam describing the file and path of topics to expose over the bridge
+
+    """
+
+    def __init__(self, poll_rate=1.0):
         rospy.init_node("port_manager_interface")
+        self.poll_rate = poll_rate
         self.registered_clients = dict()
         self.client_threads = dict()
 
         rospack = rospkg.RosPack()
         pkg_path = rospack.get_path('serial_bridge')
-        
+
         if not rospy.has_param('/serial_bridge/shared_topics_path'):
             rospy.set_param('shared_topics_path', pkg_path+'/config/demo_topics.yaml')
-        self.poll_rate = 1.0 #Hz
 
     def run(self):
+        """ Main loop. Runs on a Timer every `self.poll_rate` seconds """
+
         btpm = BluetoothPortManager()
         btpm.start()
         while not rospy.is_shutdown():

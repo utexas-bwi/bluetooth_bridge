@@ -10,6 +10,9 @@
   <maintainer email="maxsvetlik@utexas.edu">Max Svetlik</maintainer>
 
   <buildtool_depend>catkin</buildtool_depend>
+
+  <exec_depend>serial_bridge</exec_depend>
+  <exec_depend>bluetooth_port_manager</exec_depend>
   <export>
     <metapackage/>
     <architecture_independent/>
